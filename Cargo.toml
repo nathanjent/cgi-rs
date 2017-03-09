@@ -1,0 +1,6 @@
+[package]
+name = "cgi-rs"
+version = "0.1.0"
+authors = ["nathanjent <nathanjent@gmail.com>"]
+
+[dependencies]
