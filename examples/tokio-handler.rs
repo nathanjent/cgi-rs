@@ -13,9 +13,10 @@ use std::io::{self, Read, Write};
 use std::env;
 use std::collections::HashMap;
 use tokio_core::io::{Codec, EasyBuf, Io, Framed};
+use tokio_core::reactor::{Core,};
 use tokio_proto::TcpServer;
 use tokio_proto::pipeline::ServerProto;
-use tokio_service::Service;
+use tokio_service::{NewService, Service};
 
 #[derive(Debug)]
 enum CgiRequest {
@@ -180,18 +181,26 @@ fn main() {
 //    let server = TcpServer::new(CgiProto, socket);
 
     // Create a database instance to provide to spawned services.
-//    let db = Arc::new(Mutex::new(HashMap::new()));
+    let db = Arc::new(Mutex::new(HashMap::new()));
 
     // Serve requests with our created service and a handle to the database.    
 //    server.serve(move || Ok(CgiService { db: db.clone() }));
-    let status = match handle() {
+    let status = match serve(move || Ok(CgiService { db: db.clone()})) {
         Ok(_) => 0,
         Err(_) => 1,
     };
     ::std::process::exit(status);
 }
 
-fn handle() -> io::Result<()> {
+fn serve<S>(s: S) -> io::Result<()>
+    where S: NewService<Request = CgiRequest,
+                        Response = CgiResponse,
+                        Error = io::Error> + 'static
+{
+    let mut core = Core::new()?;
+    let handle = core.handle();
+
+
     let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
         .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
     let mut buffer = Vec::new();
@@ -215,6 +224,10 @@ fn handle() -> io::Result<()> {
         .chain(buffer.into_iter()).collect();
 
     let buffer = EasyBuf::from(buffer);
+    //handle.spawn(move || {
+    //    let p = CgiProto;
+    //    p.bind_transport(buffer)
+    //});
 
     io::stdout().write(buffer.as_slice())?;
 
