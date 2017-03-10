@@ -1,174 +1,222 @@
+extern crate dotenv;
 extern crate futures;
 extern crate tokio_core;
 extern crate tokio_proto;
 extern crate tokio_service;
-#[macro_use]
-extern crate serde_derive;
-extern crate dotenv;
-extern crate envy;
 
 use dotenv::dotenv;
-use rouille::Request;
-
-use std::ascii::AsciiExt;
-use std::env;
-use std::io::{self, Read, Write};
+use futures::future::{self, BoxFuture, Future};
 use std::net::SocketAddr;
-
+use std::sync::{Mutex, Arc};
+use std::str;
+use std::io::{self, Read, Write};
+use std::env;
+use std::collections::HashMap;
+use tokio_core::io::{Codec, EasyBuf, Io, Framed};
+use tokio_proto::TcpServer;
+use tokio_proto::pipeline::ServerProto;
 use tokio_service::Service;
 
-struct CGI;
-impl Service for CGI {
-    type Request = http::Request;
-    type Response = http::Response;
-    type Error = http::Error;
-    type Future = Box<Future<Item = Self::Response, Error = http::Error>>;
+#[derive(Debug)]
+enum CgiRequest {
+    Get { url: String },
+    Post { url: String, content: String },
+}
 
-    fn call(&self, req: http::Request) -> Self::Future {
-        // Create the HTTP response
-        let resp = http::Response::ok().with_body(b"hello world\n");
+enum CgiResponse {
+    NotFound,
+    Ok { content: String },
+}
 
-        // Return the response as an immediate future
-        futures::finished(resp).boxed()
+// Codecs can have state, but this one doesn't.
+struct CgiCodec;
+impl Codec for CgiCodec {
+    // Associated types which define the data taken/produced by the codec.
+    type In = CgiRequest;
+    type Out = CgiResponse;
+
+    // Returns `Ok(Some(In))` if there is a frame, `Ok(None)` if it needs more data.
+    fn decode(&mut self, buf: &mut EasyBuf) -> io::Result<Option<Self::In>> {
+        let content_so_far = String::from_utf8_lossy(buf.as_slice())
+            .to_mut()
+            .clone();
+
+        // Request headers/content in HTTP 1.1 are split by double newline.
+        match content_so_far.find("\r\n\r\n") {
+            Some(i) => {
+                // Drain from the buffer (this is important!)
+                let mut headers = {
+                    let tmp = buf.drain_to(i);
+                    String::from_utf8_lossy(tmp.as_slice())
+                        .to_mut()
+                        .clone()
+                };
+                buf.drain_to(4); // Also remove the '\r\n\r\n'.
+
+                // Get the method and drain.
+                let method = headers.find(" ")
+                    .map(|len| headers.drain(..len).collect::<String>());
+
+                headers.drain(..1); // Get rid of the space.
+
+                // Since the method was drained we can do it again to get the url.
+                let url = headers.find(" ")
+                    .map(|len| headers.drain(..len).collect::<String>())
+                    .unwrap_or_default();
+
+                // The content of a POST.
+                let content = {
+                    let remaining = buf.len();
+                    let tmp = buf.drain_to(remaining);
+                    String::from_utf8_lossy(tmp.as_slice())
+                        .to_mut()
+                        .clone()
+                };
+
+                match method {
+                    Some(ref method) if method == "GET" => {
+                        Ok(Some(CgiRequest::Get { url: url }))
+                    },
+                    Some(ref method) if method == "POST" => {
+                        Ok(Some(CgiRequest::Post { url: url, content: content }))
+                    },
+                    _ => Err(io::Error::new(io::ErrorKind::Other, "invalid"))
+                }
+            },
+            None => Ok(None),
+        }
+    }
+
+    // Produces a frame.
+    fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
+        match msg {
+            CgiResponse::NotFound => {
+                buf.extend(b"HTTP/1.1 404 Not Found\r\n");
+                buf.extend(b"Content-Length: 0\r\n");
+                buf.extend(b"Connection: close\r\n");
+            },
+            CgiResponse::Ok { content: v } =>  {
+                buf.extend(b"HTTP/1.1 200 Ok\r\n");
+                buf.extend(format!("Content-Length: {}\r\n", v.len()).as_bytes());
+                buf.extend(b"Connection: close\r\n");
+                buf.extend(b"\r\n");
+                buf.extend(v.as_bytes());
+            }
+        }
+        buf.extend(b"\r\n");
+        Ok(())
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct CGIRequest {
-    #[serde(rename = "REQUEST_METHOD")]
-    method: String,
-    request_uri: String,
-    #[serde(default = "Vec::new")]
-    headers: Vec<(String, String)>,
-    #[serde(rename = "HTTP_UPGRADE_INSECURE_REQUESTS")]
-    https: u8,
-    server_protocol: String,
-    remote_addr: SocketAddr,
+// Like codecs, protocols can carry state too!
+struct CgiProto;
+impl<T: Io + 'static> ServerProto<T> for CgiProto {
+    // These types must match the corresponding codec types:
+    type Request = <CgiCodec as Codec>::In;
+    type Response = <CgiCodec as Codec>::Out;
+
+    /// A bit of boilerplate to hook in the codec:
+    type Transport = Framed<T, CgiCodec>;
+    type BindTransport = Result<Self::Transport, io::Error>;
+    fn bind_transport(&self, io: T) -> Self::BindTransport {
+        Ok(io.framed(CgiCodec))
+    }
 }
 
-fn into_http_version(version: String) -> tiny_http::HTTPVersion {
-    let v = version.chars().filter(|c| !c.is_numeric())
-        .map(|c| c as u8).collect::<Vec<u8>>();
-    tiny_http::HTTPVersion(v[0], v[1])
+// Surprise! Services can also carry state.
+#[derive(Default)]
+struct CgiService {
+    db: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl Service for CgiService {
+    // These types must match the corresponding protocol types:
+    type Request = <CgiCodec as Codec>::In;
+    type Response = <CgiCodec as Codec>::Out;
+
+    // For non-streaming protocols, service errors are always io::Error
+    type Error = io::Error;
+
+    // The future for computing the response; box it for simplicity.
+    type Future = BoxFuture<Self::Response, Self::Error>;
+
+    // Produce a future for computing a response from a request.
+    fn call(&self, req: Self::Request) -> Self::Future {
+        println!("Request: {:?}", req);
+        
+        // Deref the database.
+        let mut db = self.db.lock()
+            .unwrap(); // This should only panic in extreme cirumstances.
+        
+        // Return the appropriate value.
+        let res = match req {
+            CgiRequest::Get { url: url } => {
+                match db.get(&url) {
+                    Some(v) => CgiResponse::Ok { content: v.clone() },
+                    None => CgiResponse::NotFound,
+                }
+            },
+            CgiRequest::Post { url: url, content: content } => {
+                match db.insert(url, content) {
+                    Some(v) => CgiResponse::Ok { content: v },
+                    None => CgiResponse::Ok { content: "".into() },
+                }
+            }
+        };
+        println!("Database: {:?}", *db);
+
+        // Return the result.
+        future::finished(res).boxed()
+    }
 }
 
 fn main() {
     dotenv::dotenv().ok();
-    match envy::from_env::<CGIRequest>() {
-       Ok(request) => println!("{:#?}", request),
-       Err(error) => panic!("{:#?}", error),
-    }
-    let mut cgi_request = CGIRequest {
-        method: "OPTIONS".into(),
-        request_uri: "/".into(),
-        headers: Vec::new(),
-        https: 0,
-        server_protocol: "HTTP/1.1".into(),
-        remote_addr: "127.0.0.1:80".parse().unwrap(),
-    };
+    
+    
+//    let socket: SocketAddr = LISTEN_TO.parse() .unwrap();
+    
+    // Create a server with the protocol.
+//    let server = TcpServer::new(CgiProto, socket);
 
-    for (k, v) in env::vars() {
-        //println!("{:?}: {:?}", k, v);
-        match &*k {
-            "AUTH_TYPE" | "CONTENT_LENGTH" | "CONTENT_TYPE" | "GATEWAY_INTERFACE" | "PATH_INFO" | "PATH_TRANSLATED" | "QUERY_STRING" | "REMOTE_HOST" | "REMOTE_IDENT" | "REMOTE_USER" | "SCRIPT_NAME" | "SERVER_NAME" | "SERVER_PORT" | "SERVER_SOFTWARE" => cgi_request.headers.push((k, v)),
-    _ => {},
-        }
-    }
+    // Create a database instance to provide to spawned services.
+//    let db = Arc::new(Mutex::new(HashMap::new()));
 
-    // TODO get body
-    let body = String::new();
-
-    //let req = tiny_http::request::new_request(
-    //    false,
-    //    Method::from_str(cgi_request.method),
-    //    cgi_request.url,
-    //    HTTPVersion(1, 1),
-    //    cgi_request.headers,
-    //    cgi_request.remote_addr,
-
-    //    );
-
-    // I know it's fake but I'm not sure how to build a request from environment variables
-    let request = Request::fake_http_from(
-        cgi_request.remote_addr,
-        cgi_request.method,
-        cgi_request.request_uri,
-        cgi_request.headers,
-        body.into(),
-    );
-
-    let rouille_response = router!{request,
-                          (GET) (/) => {
-                              rouille::Response::redirect_302("/hello")
-                          },
-                          (GET) (/hello) => {
-                              rouille::Response::text("hello")
-                          },
-                          _ => rouille::Response::text("")
-                      };
-
-    let mut upgrade_header = "".into();
-
-    // writing the response
-    let (res_data, res_len) = rouille_response.data.into_reader_and_size();
-    let mut response = tiny_http::Response::empty(rouille_response.status_code)
-        .with_data(res_data, res_len);
-    let mut response_headers = Vec::new();
-    for (key, value) in request.headers() {
-        if key.eq_ignore_ascii_case("Content-Length") {
-            continue;
-        }
-
-        if key.eq_ignore_ascii_case("Upgrade") {
-            upgrade_header = value;
-            continue;
-        }
-
-        if let Ok(header) = tiny_http::Header::from_bytes(key.as_bytes(), value.as_bytes()) {
-            response_headers.push(header);
-        } else {
-            // TODO: ?
-        }
-    }
-
-    let stdout = io::stdout();
-    let mut writer = stdout.lock();
-    response.raw_print(
-        writer,
-        into_http_version(cgi_request.server_protocol),
-        &response_headers[..],
-        true,
-        None,
-        );
-
-    ::std::process::exit(0);
-}
-fn main() {
-    let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
-        .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
-    let status = match handle(content_length) {
+    // Serve requests with our created service and a handle to the database.    
+//    server.serve(move || Ok(CgiService { db: db.clone() }));
+    let status = match handle() {
         Ok(_) => 0,
         Err(_) => 1,
     };
     ::std::process::exit(status);
 }
 
-fn handle(content_length: u64) -> io::Result<()> {
+fn handle() -> io::Result<()> {
+    let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
+        .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
     let mut buffer = Vec::new();
     io::stdin().take(content_length).read_to_end(&mut buffer)?;
 
-    println!("Content-Type: text/html");
-    println!();
-    println!("<p>Hello, world!</p>");
-    println!("<ul>");
-    for (key, value) in ::std::env::vars() {
-        println!("<li>{}: {}</li>", key, value);
-    }
-    println!("</ul>");
+    // TODO parse env vars into stream
+    let buffer: Vec<u8> = env::vars()
+        .filter_map(|(k, v)| {
+            if k.starts_with("HTTP_") {
+                if let Some(header) = k.splitn(2, '_').nth(1) {
+                    header.replace('_', "-");
+                    Some(format!("{}: {}\r\n\r\n", header, v))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+        .flat_map(String::into_bytes)
+        .chain(buffer.into_iter()).collect();
 
-    println!("<p>");
-    io::stdout().write(&buffer[..])?;
-    println!("</p>");
+    let buffer = EasyBuf::from(buffer);
+
+    io::stdout().write(buffer.as_slice())?;
 
     Ok(())
 }
