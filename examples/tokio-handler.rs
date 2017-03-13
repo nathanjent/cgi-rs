@@ -3,6 +3,7 @@ extern crate futures;
 extern crate tokio_core;
 extern crate tokio_proto;
 extern crate tokio_service;
+extern crate tokio_stdio;
 
 use dotenv::dotenv;
 use futures::future::{self, BoxFuture, Future};
@@ -17,6 +18,7 @@ use tokio_core::reactor::{Core,};
 use tokio_proto::TcpServer;
 use tokio_proto::pipeline::ServerProto;
 use tokio_service::{NewService, Service};
+use tokio_stdio::stdio::Stdio;
 
 #[derive(Debug)]
 enum CgiRequest {
@@ -173,7 +175,7 @@ impl Service for CgiService {
 
 fn main() {
     dotenv::dotenv().ok();
-    
+    let stdio = Stdio::new(1, 1);
     
 //    let socket: SocketAddr = LISTEN_TO.parse() .unwrap();
     
@@ -199,7 +201,6 @@ fn serve<S>(s: S) -> io::Result<()>
 {
     let mut core = Core::new()?;
     let handle = core.handle();
-
 
     let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
         .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
