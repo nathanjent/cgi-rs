@@ -1,11 +1,11 @@
 extern crate dotenv;
 extern crate futures;
+extern crate mio;
 extern crate tokio_core;
 extern crate tokio_proto;
 extern crate tokio_service;
 extern crate tokio_stdio;
 
-use dotenv::dotenv;
 use futures::future::{self, BoxFuture, Future};
 use std::net::SocketAddr;
 use std::sync::{Mutex, Arc};
@@ -14,11 +14,12 @@ use std::io::{self, Read, Write};
 use std::env;
 use std::collections::HashMap;
 use tokio_core::io::{Codec, EasyBuf, Io, Framed};
-use tokio_core::reactor::{Core,};
+use tokio_core::reactor::{Core, PollEvented};
 use tokio_proto::TcpServer;
 use tokio_proto::pipeline::ServerProto;
 use tokio_service::{NewService, Service};
 use tokio_stdio::stdio::Stdio;
+use mio::{Evented, Ready, Poll, PollOpt, Token};
 
 #[derive(Debug)]
 enum CgiRequest {
@@ -204,33 +205,80 @@ fn serve<S>(s: S) -> io::Result<()>
 
     let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
         .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
+
     let mut buffer = Vec::new();
-    io::stdin().take(content_length).read_to_end(&mut buffer)?;
+    //tokio_core::io::read(io::stdin(), buffer);
+
+    let poller = PollEvented::new(BodyStdIn(&io::stdin()), &handle);
+
+    //let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
+    //    .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
+    //let mut buffer = Vec::new();
+    //io::stdin().take(content_length).read_to_end(&mut buffer)?;
 
     // TODO parse env vars into stream
-    let buffer: Vec<u8> = env::vars()
-        .filter_map(|(k, v)| {
-            if k.starts_with("HTTP_") {
-                if let Some(header) = k.splitn(2, '_').nth(1) {
-                    header.replace('_', "-");
-                    Some(format!("{}: {}\r\n\r\n", header, v))
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        })
-        .flat_map(String::into_bytes)
-        .chain(buffer.into_iter()).collect();
+    //let buffer: Vec<u8> = env::vars()
+    //    .filter_map(|(k, v)| {
+    //        if k.starts_with("HTTP_") {
+    //            if let Some(header) = k.splitn(2, '_').nth(1) {
+    //                header.replace('_', "-");
+    //                Some(format!("{}: {}\r\n\r\n", header, v))
+    //            } else {
+    //                None
+    //            }
+    //        } else {
+    //            None
+    //        }
+    //    })
+    //    .flat_map(String::into_bytes)
+    //    .chain(buffer.into_iter()).collect();
 
-    let buffer = EasyBuf::from(buffer);
+    //let buffer = EasyBuf::from(buffer);
     //handle.spawn(move || {
     //    let p = CgiProto;
     //    p.bind_transport(buffer)
     //});
 
-    io::stdout().write(buffer.as_slice())?;
+    //io::stdout().write(buffer.as_slice())?;
+    tokio_core::io::flush(io::stdout());
 
     Ok(())
+}
+
+struct BodyStdIn<'body>(&'body io::Stdin); 
+
+
+impl<'body> mio::io::Evented for BodyStdIn<'body> {
+    fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> io::Result<()> {
+        if self.registration.borrow().is_some() {
+            return Err(io::Error::new(io::ErrorKind::Other, "receiver already registered"));
+        }
+
+        let (registration, set_readiness) = Registration::new(poll, token, interest, opts);
+
+
+        if self.inner.pending.load(Ordering::Relaxed) > 0 {
+            // TODO: Don't drop readiness
+            let _ = set_readiness.set_readiness(Ready::readable());
+        }
+
+        self.registration.fill(registration).ok().expect("unexpected state encountered");
+        self.inner.set_readiness.fill(set_readiness).ok().expect("unexpected state encountered");
+
+        Ok(())
+    }
+
+    fn reregister(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> io::Result<()> {
+        match self.registration.borrow() {
+            Some(registration) => registration.update(poll, token, interest, opts),
+            None => Err(io::Error::new(io::ErrorKind::Other, "receiver not registered")),
+        }
+    }
+
+    fn deregister(&self, poll: &Poll) -> io::Result<()> {
+        match self.registration.borrow() {
+            Some(registration) => registration.deregister(poll),
+            None => Err(io::Error::new(io::ErrorKind::Other, "receiver not registered")),
+        }
+    }
 }
