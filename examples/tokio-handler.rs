@@ -15,7 +15,7 @@ use std::env;
 use std::collections::HashMap;
 use tokio_core::io::{Codec, EasyBuf, Io, Framed};
 use tokio_core::reactor::{Core, PollEvented};
-use tokio_proto::TcpServer;
+use tokio_proto::BindServer;
 use tokio_proto::pipeline::ServerProto;
 use tokio_service::{NewService, Service};
 use tokio_stdio::stdio::Stdio;
@@ -34,6 +34,7 @@ enum CgiResponse {
 
 // Codecs can have state, but this one doesn't.
 struct CgiCodec;
+
 impl Codec for CgiCodec {
     // Associated types which define the data taken/produced by the codec.
     type In = CgiRequest;
@@ -114,6 +115,7 @@ impl Codec for CgiCodec {
 
 // Like codecs, protocols can carry state too!
 struct CgiProto;
+
 impl<T: Io + 'static> ServerProto<T> for CgiProto {
     // These types must match the corresponding codec types:
     type Request = <CgiCodec as Codec>::In;
@@ -146,7 +148,6 @@ impl Service for CgiService {
 
     // Produce a future for computing a response from a request.
     fn call(&self, req: Self::Request) -> Self::Future {
-        println!("Request: {:?}", req);
         
         // Deref the database.
         let mut db = self.db.lock()
@@ -167,7 +168,6 @@ impl Service for CgiService {
                 }
             }
         };
-        println!("Database: {:?}", *db);
 
         // Return the result.
         future::finished(res).boxed()
@@ -176,43 +176,42 @@ impl Service for CgiService {
 
 fn main() {
     dotenv::dotenv().ok();
-    let stdio = Stdio::new(1, 1);
     
-//    let socket: SocketAddr = LISTEN_TO.parse() .unwrap();
-    
-    // Create a server with the protocol.
-//    let server = TcpServer::new(CgiProto, socket);
-
     // Create a database instance to provide to spawned services.
     let db = Arc::new(Mutex::new(HashMap::new()));
 
     // Serve requests with our created service and a handle to the database.    
-//    server.serve(move || Ok(CgiService { db: db.clone() }));
-    let status = match serve(move || Ok(CgiService { db: db.clone()})) {
+    let status = match serve(Arc::new(CgiProto), move || Ok(CgiService { db: db.clone()})) {
         Ok(_) => 0,
         Err(_) => 1,
     };
     ::std::process::exit(status);
 }
 
-fn serve<S>(s: S) -> io::Result<()>
-    where S: NewService<Request = CgiRequest,
-                        Response = CgiResponse,
-                        Error = io::Error> + 'static
+fn serve<P, StdioKind, S>(binder: Arc<P>, s: S) -> io::Result<()>
+    where P: BindServer<StdioKind, Stdio>,
+          S: NewService<Request = P::ServiceRequest,
+                        Response = P::ServiceResponse,
+                        Error = P::ServiceError> + 'static
 {
     let mut core = Core::new()?;
     let handle = core.handle();
 
+    let stdio = Stdio::new(16, 16);
+    let service = s.new_service()?;
+    binder.bind_server(&handle, stdio, service);
+
+    core.run(service.call(req)).unwrap();
+    
+//    let (reader, writer) = stdio.framed(CgiCodec).split();
+//    let responses = reader.and_then(move |req| service.call(req));
+//    let server = writer.send_all(responses).then(|_| Ok(()));
+//    handle.spawn(server);
+
+
     let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
         .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
 
-    let mut buffer = Vec::new();
-    //tokio_core::io::read(io::stdin(), buffer);
-
-    let poller = PollEvented::new(BodyStdIn(&io::stdin()), &handle);
-
-    //let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
-    //    .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
     //let mut buffer = Vec::new();
     //io::stdin().take(content_length).read_to_end(&mut buffer)?;
 
@@ -233,52 +232,5 @@ fn serve<S>(s: S) -> io::Result<()>
     //    .flat_map(String::into_bytes)
     //    .chain(buffer.into_iter()).collect();
 
-    //let buffer = EasyBuf::from(buffer);
-    //handle.spawn(move || {
-    //    let p = CgiProto;
-    //    p.bind_transport(buffer)
-    //});
-
-    //io::stdout().write(buffer.as_slice())?;
-    tokio_core::io::flush(io::stdout());
-
     Ok(())
-}
-
-struct BodyStdIn<'body>(&'body io::Stdin); 
-
-
-impl<'body> mio::io::Evented for BodyStdIn<'body> {
-    fn register(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> io::Result<()> {
-        if self.registration.borrow().is_some() {
-            return Err(io::Error::new(io::ErrorKind::Other, "receiver already registered"));
-        }
-
-        let (registration, set_readiness) = Registration::new(poll, token, interest, opts);
-
-
-        if self.inner.pending.load(Ordering::Relaxed) > 0 {
-            // TODO: Don't drop readiness
-            let _ = set_readiness.set_readiness(Ready::readable());
-        }
-
-        self.registration.fill(registration).ok().expect("unexpected state encountered");
-        self.inner.set_readiness.fill(set_readiness).ok().expect("unexpected state encountered");
-
-        Ok(())
-    }
-
-    fn reregister(&self, poll: &Poll, token: Token, interest: Ready, opts: PollOpt) -> io::Result<()> {
-        match self.registration.borrow() {
-            Some(registration) => registration.update(poll, token, interest, opts),
-            None => Err(io::Error::new(io::ErrorKind::Other, "receiver not registered")),
-        }
-    }
-
-    fn deregister(&self, poll: &Poll) -> io::Result<()> {
-        match self.registration.borrow() {
-            Some(registration) => registration.deregister(poll),
-            None => Err(io::Error::new(io::ErrorKind::Other, "receiver not registered")),
-        }
-    }
 }
