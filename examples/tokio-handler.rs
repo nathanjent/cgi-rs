@@ -79,15 +79,16 @@ impl Codec for CgiCodec {
                 };
 
                 match method {
-                    Some(ref method) if method == "GET" => {
-                        Ok(Some(CgiRequest::Get { url: url }))
-                    },
+                    Some(ref method) if method == "GET" => Ok(Some(CgiRequest::Get { url: url })),
                     Some(ref method) if method == "POST" => {
-                        Ok(Some(CgiRequest::Post { url: url, content: content }))
-                    },
-                    _ => Err(io::Error::new(io::ErrorKind::Other, "invalid"))
+                        Ok(Some(CgiRequest::Post {
+                            url: url,
+                            content: content,
+                        }))
+                    }
+                    _ => Err(io::Error::new(io::ErrorKind::Other, "invalid")),
                 }
-            },
+            }
             None => Ok(None),
         }
     }
@@ -99,8 +100,8 @@ impl Codec for CgiCodec {
                 buf.extend(b"HTTP/1.1 404 Not Found\r\n");
                 buf.extend(b"Content-Length: 0\r\n");
                 buf.extend(b"Connection: close\r\n");
-            },
-            CgiResponse::Ok { content: v } =>  {
+            }
+            CgiResponse::Ok { content: v } => {
                 buf.extend(b"HTTP/1.1 200 Ok\r\n");
                 buf.extend(format!("Content-Length: {}\r\n", v.len()).as_bytes());
                 buf.extend(b"Connection: close\r\n");
@@ -148,11 +149,12 @@ impl Service for CgiService {
 
     // Produce a future for computing a response from a request.
     fn call(&self, req: Self::Request) -> Self::Future {
-        
+
         // Deref the database.
-        let mut db = self.db.lock()
+        let mut db = self.db
+            .lock()
             .unwrap(); // This should only panic in extreme cirumstances.
-        
+
         // Return the appropriate value.
         let res = match req {
             CgiRequest::Get { url: url } => {
@@ -160,7 +162,7 @@ impl Service for CgiService {
                     Some(v) => CgiResponse::Ok { content: v.clone() },
                     None => CgiResponse::NotFound,
                 }
-            },
+            }
             CgiRequest::Post { url: url, content: content } => {
                 match db.insert(url, content) {
                     Some(v) => CgiResponse::Ok { content: v },
@@ -176,12 +178,13 @@ impl Service for CgiService {
 
 fn main() {
     dotenv::dotenv().ok();
-    
+
     // Create a database instance to provide to spawned services.
     let db = Arc::new(Mutex::new(HashMap::new()));
 
-    // Serve requests with our created service and a handle to the database.    
-    let status = match serve(Arc::new(CgiProto), move || Ok(CgiService { db: db.clone()})) {
+    // Serve requests with our created service and a handle to the database.
+    let status = match serve(Arc::new(CgiProto),
+                             move || Ok(CgiService { db: db.clone() })) {
         Ok(_) => 0,
         Err(_) => 1,
     };
@@ -202,15 +205,17 @@ fn serve<P, StdioKind, S>(binder: Arc<P>, s: S) -> io::Result<()>
     binder.bind_server(&handle, stdio, service);
 
     core.run(service.call(req)).unwrap();
-    
-//    let (reader, writer) = stdio.framed(CgiCodec).split();
-//    let responses = reader.and_then(move |req| service.call(req));
-//    let server = writer.send_all(responses).then(|_| Ok(()));
-//    handle.spawn(server);
+
+    //    let (reader, writer) = stdio.framed(CgiCodec).split();
+    //    let responses = reader.and_then(move |req| service.call(req));
+    //    let server = writer.send_all(responses).then(|_| Ok(()));
+    //    handle.spawn(server);
 
 
-    let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
-        .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
+    let content_length = env::var("CONTENT_LENGTH")
+        .unwrap_or("0".into())
+        .parse::<u64>()
+        .expect("Error parsing CONTENT_LENGTH");
 
     //let mut buffer = Vec::new();
     //io::stdin().take(content_length).read_to_end(&mut buffer)?;

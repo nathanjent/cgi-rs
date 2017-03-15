@@ -2,8 +2,10 @@ use std::io::{self, Read, Write};
 use std::env;
 
 fn main() {
-    let content_length = env::var("CONTENT_LENGTH").unwrap_or("0".into())
-        .parse::<u64>().expect("Error parsing CONTENT_LENGTH");
+    let content_length = env::var("CONTENT_LENGTH")
+        .unwrap_or("0".into())
+        .parse::<u64>()
+        .expect("Error parsing CONTENT_LENGTH");
     let status = match handle(content_length) {
         Ok(_) => 0,
         Err(_) => 1,
