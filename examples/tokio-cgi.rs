@@ -8,21 +8,17 @@ extern crate tokio_service;
 extern crate tokio_stdio;
 
 use futures::{future, BoxFuture, Future};
-use std::net::SocketAddr;
-use std::sync::{Mutex, Arc};
+//use std::net::SocketAddr;
+//use std::sync::{Mutex, Arc};
 use std::str;
-use std::io::{self, Read, Write};
+use std::io;
 use std::env;
-use std::collections::HashMap;
 use tokio_core::io::{Codec, EasyBuf, Io, Framed};
-use tokio_core::reactor::{Core, PollEvented};
+use tokio_core::reactor::Core;
 use tokio_proto::BindServer;
 use tokio_proto::pipeline::ServerProto;
-use tokio_service::{NewService, Service};
+use tokio_service::Service;
 use tokio_stdio::stdio::Stdio;
-use mio::{Evented, Ready, Poll, PollOpt, Token};
-
-use tokio_proto::TcpServer;
 
 fn main() {
     dotenv::dotenv().ok();
@@ -34,6 +30,7 @@ fn main() {
     let server = CgiProto;
     let service = CgiService;
     server.bind_server(&handle, stdio, service);
+    core.turn(Some(::std::time::Duration::from_millis(10)));
 
     //let (read, write) = Stdio::new(1, 1).split();
 
@@ -80,11 +77,11 @@ impl Service for CgiService {
 
         // Return the appropriate value.
         let res = match req {
-            CgiRequest::Get { url: url } => {
-                CgiResponse::Ok { content: "GET".into() }
+            CgiRequest::Get { url } => {
+                CgiResponse::Ok { content: "GET_RESPONSE".into() }
             }
-            CgiRequest::Post { url: url, content: content } => {
-                CgiResponse::Ok { content: "POST".into() }
+            CgiRequest::Post { url, content } => {
+                CgiResponse::Ok { content: "POST_RESPONSE".into() }
             }
         };
 
@@ -103,9 +100,7 @@ impl Codec for CgiCodec {
 
     // Returns `Ok(Some(In))` if there is a frame, `Ok(None)` if it needs more data.
     fn decode(&mut self, buf: &mut EasyBuf) -> io::Result<Option<Self::In>> {
-        let content_so_far = String::from_utf8_lossy(buf.as_slice())
-            .to_mut()
-            .clone();
+        //let content_so_far = String::from_utf8_lossy(buf.as_slice()).to_mut().clone();
 
         let mut url = None;
         let mut method = None;
@@ -113,10 +108,10 @@ impl Codec for CgiCodec {
         // get request fields from headers set as environment variables
         for (k, v) in env::vars() {
             match &*k {
-                "HTTP_REQUEST_METHOD" => {
+                "REQUEST_METHOD" => {
                     method = Some(v);
                 }
-                "HTTP_REQUEST_URL" => {
+                "REQUEST_URL" => {
                     url = Some(v);
                 }
                 _ => {}
