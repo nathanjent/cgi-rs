@@ -1,4 +1,5 @@
 extern crate dotenv;
+extern crate envy;
 extern crate futures;
 extern crate mio;
 extern crate tokio_core;
@@ -24,17 +25,14 @@ use mio::{Evented, Ready, Poll, PollOpt, Token};
 use tokio_proto::TcpServer;
 
 fn main() {
+    dotenv::dotenv().ok();
+
     let mut core = Core::new().unwrap();
     let handle = core.handle();
-    
-    let mut headers = HashMap::new();
-    headers.insert("HEADER".into(), "VALUE".into());
 
     let stdio = Stdio::new(1, 1);
     let server = CgiProto;
-    let service = CgiService {
-        headers: Arc::new(Mutex::new(headers))
-    };
+    let service = CgiService;
     server.bind_server(&handle, stdio, service);
 
     //let (read, write) = Stdio::new(1, 1).split();
@@ -65,10 +63,7 @@ enum CgiResponse {
 }
 
 #[derive(Default)]
-struct CgiService {
-    headers: Arc<Mutex<HashMap<String, String>>>,
-}
-
+struct CgiService;
 impl Service for CgiService {
     // These types must match the corresponding protocol types:
     type Request = <CgiCodec as Codec>::In;
@@ -83,24 +78,13 @@ impl Service for CgiService {
     // Produce a future for computing a response from a request.
     fn call(&self, req: Self::Request) -> Self::Future {
 
-        // Deref the headers.
-        let mut headers = self.headers
-            .lock()
-            .unwrap(); // This should only panic in extreme cirumstances.
-
         // Return the appropriate value.
         let res = match req {
             CgiRequest::Get { url: url } => {
-                match headers.get(&url) {
-                    Some(v) => CgiResponse::Ok { content: v.clone() },
-                    None => CgiResponse::NotFound,
-                }
+                CgiResponse::Ok { content: "GET".into() }
             }
             CgiRequest::Post { url: url, content: content } => {
-                match headers.insert(url, content) {
-                    Some(v) => CgiResponse::Ok { content: v },
-                    None => CgiResponse::Ok { content: "".into() },
-                }
+                CgiResponse::Ok { content: "POST".into() }
             }
         };
 
@@ -123,50 +107,44 @@ impl Codec for CgiCodec {
             .to_mut()
             .clone();
 
-        // Request headers/content in HTTP 1.1 are split by double newline.
-        match content_so_far.find("\r\n\r\n") {
-            Some(i) => {
-                // Drain from the buffer (this is important!)
-                let mut headers = {
-                    let tmp = buf.drain_to(i);
-                    String::from_utf8_lossy(tmp.as_slice())
-                        .to_mut()
-                        .clone()
-                };
-                buf.drain_to(4); // Also remove the '\r\n\r\n'.
+        let mut url = None;
+        let mut method = None;
 
-                // Get the method and drain.
-                let method = headers.find(" ")
-                    .map(|len| headers.drain(..len).collect::<String>());
-
-                headers.drain(..1); // Get rid of the space.
-
-                // Since the method was drained we can do it again to get the url.
-                let url = headers.find(" ")
-                    .map(|len| headers.drain(..len).collect::<String>())
-                    .unwrap_or_default();
-
-                // The content of a POST.
-                let content = {
-                    let remaining = buf.len();
-                    let tmp = buf.drain_to(remaining);
-                    String::from_utf8_lossy(tmp.as_slice())
-                        .to_mut()
-                        .clone()
-                };
-
-                match method {
-                    Some(ref method) if method == "GET" => Ok(Some(CgiRequest::Get { url: url })),
-                    Some(ref method) if method == "POST" => {
-                        Ok(Some(CgiRequest::Post {
-                            url: url,
-                            content: content,
-                        }))
-                    }
-                    _ => Err(io::Error::new(io::ErrorKind::Other, "invalid")),
+        // get request fields from headers set as environment variables
+        for (k, v) in env::vars() {
+            match &*k {
+                "HTTP_REQUEST_METHOD" => {
+                    method = Some(v);
                 }
+                "HTTP_REQUEST_URL" => {
+                    url = Some(v);
+                }
+                _ => {}
             }
-            None => Ok(None),
+        }
+
+        // The content of a POST.
+        let content = {
+            let remaining = buf.len();
+            let tmp = buf.drain_to(remaining);
+            String::from_utf8_lossy(tmp.as_slice())
+                .to_mut()
+                .clone()
+        };
+
+        match method {
+            Some(ref method) if method == "GET" => {
+                Ok(Some(CgiRequest::Get {
+                    url: url.unwrap().into(),
+                }))
+            }
+            Some(ref method) if method == "POST" => {
+                Ok(Some(CgiRequest::Post {
+                    url: url.unwrap().into(),
+                    content: content,
+                }))
+            }
+            _ => Err(io::Error::new(io::ErrorKind::Other, "invalid")),
         }
     }
 
