@@ -6,12 +6,15 @@ extern crate tokio_core;
 extern crate tokio_proto;
 extern crate tokio_service;
 extern crate tokio_stdio;
+#[macro_use]
+extern crate serde_derive;
 
 use futures::{future, BoxFuture, Future};
 //use std::net::SocketAddr;
 //use std::sync::{Mutex, Arc};
 use std::str;
 use std::io;
+use dotenv::dotenv;
 use std::env;
 use tokio_core::io::{Codec, EasyBuf, Io, Framed};
 use tokio_core::reactor::Core;
@@ -21,7 +24,7 @@ use tokio_service::Service;
 use tokio_stdio::stdio::Stdio;
 
 fn main() {
-    dotenv::dotenv().ok();
+    dotenv().ok();
 
     let mut core = Core::new().unwrap();
     let handle = core.handle();
@@ -45,6 +48,23 @@ fn main() {
     //    Err(_) => 1,
     //};
     //::std::process::exit(status);
+}
+
+#[derive(Deserialize, Debug)]
+struct EnvRequest {
+    #[serde(rename = "REQUEST_METHOD")]
+    method: String,
+    #[serde(rename = "REQUEST_URI")]
+    request_uri: String,
+    #[serde(default = "Vec::new")]
+    headers: Vec<(String, String)>,
+    #[serde(rename = "HTTP_UPGRADE_INSECURE_REQUESTS")]
+    https: u8,
+    server_protocol: String,
+    #[serde(rename = "REMOTE_ADDR")]
+    remote_addr: String,
+    #[serde(rename = "REMOTE_PORT")]
+    remote_port: u8,
 }
 
 #[derive(Debug)]
