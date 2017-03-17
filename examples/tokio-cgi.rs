@@ -9,7 +9,8 @@ extern crate tokio_stdio;
 #[macro_use]
 extern crate serde_derive;
 
-use futures::{future, BoxFuture, Future};
+use futures::{BoxFuture, Future};
+use futures::future::{self, FutureResult, result};
 //use std::net::SocketAddr;
 //use std::sync::{Mutex, Arc};
 use std::str;
@@ -31,23 +32,18 @@ fn main() {
 
     let stdio = Stdio::new(1, 1);
     let server = CgiProto;
-    let service = CgiService;
-    server.bind_server(&handle, stdio, service);
-    core.turn(Some(::std::time::Duration::from_millis(10)));
 
-    //let (read, write) = Stdio::new(1, 1).split();
+    let result = core.run(future::lazy(move || -> FutureResult<(), io::Error> {
+        let service = CgiService;
+        server.bind_server(&handle, stdio, service);
+        result::<(), io::Error>(Ok(()))
+    }));
 
-    //let mut buffer = Vec::new();
-    //let responder = tokio_core::io::read_to_end(read, buffer)
-    //    .and_then(|(read, body)| {
-    //        tokio_core::io::write_all(write, body)
-    //    });
-
-    //let status = match core.run(responder) {
-    //    Ok(_) => 0,
-    //    Err(_) => 1,
-    //};
-    //::std::process::exit(status);
+    let status = match result {
+        Ok(_) => 0,
+        Err(_) => 1,
+    };
+    ::std::process::exit(status);
 }
 
 #[derive(Deserialize, Debug)]
