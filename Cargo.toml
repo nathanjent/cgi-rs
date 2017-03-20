@@ -4,6 +4,7 @@ name = "cgi-rs"
 version = "0.1.0"
 
 [dependencies]
+bytes = "0.4.1"
 dotenv = "0.8.0"
 envy = "0.2.0"
 futures = "0.1"
@@ -12,11 +13,9 @@ reqwest = "0.4.0"
 serde = "0.9.11"
 serde_derive = "0.9.11"
 tokio-core = "0.1"
+tokio-io = "0.1.0"
 tokio-proto = "0.1"
 tokio-service = "0.1"
-tokio-stdio = { git = "https://github.com/smith61/tokio-stdio" }
-#hyper = "0.10.5"
-#hyper-router = "0.2.0"
-#hyper_serde = "0.6.2"
-#time = "0.1"
-#cookie = { version = "0.6", default-features = false }
+
+[dependencies.tokio-stdio]
+git = "https://github.com/smith61/tokio-stdio"

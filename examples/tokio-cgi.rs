@@ -3,11 +3,13 @@ extern crate envy;
 extern crate futures;
 extern crate mio;
 extern crate tokio_core;
+extern crate tokio_io;
 extern crate tokio_proto;
 extern crate tokio_service;
 extern crate tokio_stdio;
 #[macro_use]
 extern crate serde_derive;
+extern crate bytes;
 
 use futures::{BoxFuture, Future};
 use futures::future::{self, FutureResult, result};
@@ -17,12 +19,14 @@ use std::str;
 use std::io;
 use dotenv::dotenv;
 use std::env;
+use tokio_io::codec::{Encoder, Decoder};
 use tokio_core::io::{Codec, EasyBuf, Io, Framed};
 use tokio_core::reactor::Core;
 use tokio_proto::BindServer;
 use tokio_proto::pipeline::ServerProto;
 use tokio_service::Service;
 use tokio_stdio::stdio::Stdio;
+use bytes::BytesMut;
 
 fn main() {
     dotenv().ok();
@@ -31,15 +35,15 @@ fn main() {
     let handle = core.handle();
 
     let stdio = Stdio::new(1, 1);
-    let server = CgiProto;
+    let protocol = CgiProto;
+    let service = CgiService;
 
-    let result = core.run(future::lazy(move || -> FutureResult<(), io::Error> {
-        let service = CgiService;
-        server.bind_server(&handle, stdio, service);
+    let server = future::lazy(move || -> FutureResult<(), io::Error> {
+        protocol.bind_server(&handle, stdio, service);
         result::<(), io::Error>(Ok(()))
-    }));
+    });
 
-    let status = match result {
+    let status = match core.run(server) {
         Ok(_) => 0,
         Err(_) => 1,
     };
@@ -90,6 +94,7 @@ impl Service for CgiService {
 
     // Produce a future for computing a response from a request.
     fn call(&self, req: Self::Request) -> Self::Future {
+        println!("call");
 
         // Return the appropriate value.
         let res = match req {
@@ -116,6 +121,7 @@ impl Codec for CgiCodec {
 
     // Returns `Ok(Some(In))` if there is a frame, `Ok(None)` if it needs more data.
     fn decode(&mut self, buf: &mut EasyBuf) -> io::Result<Option<Self::In>> {
+        println!("decode");
         //let content_so_far = String::from_utf8_lossy(buf.as_slice()).to_mut().clone();
 
         let mut url = None;
@@ -161,6 +167,7 @@ impl Codec for CgiCodec {
 
     // Produces a frame.
     fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
+        println!("encode");
         match msg {
             CgiResponse::NotFound => {
                 buf.extend(b"HTTP/1.1 404 Not Found\r\n");
@@ -180,6 +187,35 @@ impl Codec for CgiCodec {
     }
 }
 
+impl Encoder for CgiCodec {
+    type Item = CgiResponse;
+    type Error = io::Error;
+
+    fn encode(&mut self,
+              item: Self::Item,
+              dst: &mut BytesMut)
+              -> Result<(), Self::Error>
+              {
+        println!("encode");
+        match item {
+            CgiResponse::NotFound => {
+                dst.extend(b"HTTP/1.1 404 Not Found\r\n");
+                dst.extend(b"Content-Length: 0\r\n");
+                dst.extend(b"Connection: close\r\n");
+            }
+            CgiResponse::Ok { content: v } => {
+                dst.extend(b"HTTP/1.1 200 Ok\r\n");
+                dst.extend(format!("Content-Length: {}\r\n", v.len()).as_bytes());
+                dst.extend(b"Connection: close\r\n");
+                dst.extend(b"\r\n");
+                dst.extend(v.as_bytes());
+            }
+        }
+        dst.extend(b"\r\n");
+        Ok(())
+              }
+}
+
 // Like codecs, protocols can carry state too!
 struct CgiProto;
 
@@ -192,6 +228,7 @@ impl<T: Io + 'static> ServerProto<T> for CgiProto {
     type Transport = Framed<T, CgiCodec>;
     type BindTransport = Result<Self::Transport, io::Error>;
     fn bind_transport(&self, io: T) -> Self::BindTransport {
-        Ok(io.framed(CgiCodec))
+        let framed = io.framed(CgiCodec);
+        Ok(framed)
     }
 }
