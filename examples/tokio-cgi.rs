@@ -39,7 +39,9 @@ fn main() {
     let service = CgiService;
 
     let server = future::lazy(move || -> FutureResult<(), io::Error> {
+        println!("serving...");
         protocol.bind_server(&handle, stdio, service);
+        println!("served");
         result::<(), io::Error>(Ok(()))
     });
 
@@ -98,9 +100,7 @@ impl Service for CgiService {
 
         // Return the appropriate value.
         let res = match req {
-            CgiRequest::Get { url } => {
-                CgiResponse::Ok { content: "GET_RESPONSE".into() }
-            }
+            CgiRequest::Get { url } => CgiResponse::Ok { content: "GET_RESPONSE".into() },
             CgiRequest::Post { url, content } => {
                 CgiResponse::Ok { content: "POST_RESPONSE".into() }
             }
@@ -151,9 +151,7 @@ impl Codec for CgiCodec {
 
         match method {
             Some(ref method) if method == "GET" => {
-                Ok(Some(CgiRequest::Get {
-                    url: url.unwrap().into(),
-                }))
+                Ok(Some(CgiRequest::Get { url: url.unwrap().into() }))
             }
             Some(ref method) if method == "POST" => {
                 Ok(Some(CgiRequest::Post {
@@ -187,15 +185,57 @@ impl Codec for CgiCodec {
     }
 }
 
+impl Decoder for CgiCodec {
+    type Item = CgiRequest;
+    type Error = io::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        println!("decode");
+        //let content_so_far = String::from_utf8_lossy(src.as_slice()).to_mut().clone();
+
+        let mut url = None;
+        let mut method = None;
+
+        // get request fields from headers set as environment variables
+        for (k, v) in env::vars() {
+            match &*k {
+                "REQUEST_METHOD" => {
+                    method = Some(v);
+                }
+                "REQUEST_URL" => {
+                    url = Some(v);
+                }
+                _ => {}
+            }
+        }
+
+        // The content of a POST.
+        let content = {
+            String::from_utf8_lossy(src.iter().as_slice())
+                .to_mut()
+                .clone()
+        };
+
+        match method {
+            Some(ref method) if method == "GET" => {
+                Ok(Some(CgiRequest::Get { url: url.unwrap().into() }))
+            }
+            Some(ref method) if method == "POST" => {
+                Ok(Some(CgiRequest::Post {
+                    url: url.unwrap().into(),
+                    content: content,
+                }))
+            }
+            _ => Err(io::Error::new(io::ErrorKind::Other, "invalid")),
+        }
+    }
+}
+
 impl Encoder for CgiCodec {
     type Item = CgiResponse;
     type Error = io::Error;
 
-    fn encode(&mut self,
-              item: Self::Item,
-              dst: &mut BytesMut)
-              -> Result<(), Self::Error>
-              {
+    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         println!("encode");
         match item {
             CgiResponse::NotFound => {
@@ -213,7 +253,7 @@ impl Encoder for CgiCodec {
         }
         dst.extend(b"\r\n");
         Ok(())
-              }
+    }
 }
 
 // Like codecs, protocols can carry state too!
@@ -229,6 +269,7 @@ impl<T: Io + 'static> ServerProto<T> for CgiProto {
     type BindTransport = Result<Self::Transport, io::Error>;
     fn bind_transport(&self, io: T) -> Self::BindTransport {
         let framed = io.framed(CgiCodec);
+        println!("bind_transport");
         Ok(framed)
     }
 }
