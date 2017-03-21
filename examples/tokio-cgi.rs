@@ -12,44 +12,136 @@ extern crate serde_derive;
 extern crate bytes;
 
 use futures::{BoxFuture, Future};
-use futures::future::{self, FutureResult, result};
-//use std::net::SocketAddr;
-//use std::sync::{Mutex, Arc};
-use std::str;
-use std::io;
+use futures::future::{self, err, FutureResult, result};
+use std::{thread, io, str};
+use std::sync::{Mutex, Arc};
+use std::marker::PhantomData;
 use dotenv::dotenv;
 use std::env;
 use tokio_io::codec::{Encoder, Decoder};
 use tokio_core::io::{Codec, EasyBuf, Io, Framed};
-use tokio_core::reactor::Core;
+use tokio_core::reactor::{Handle, Core};
 use tokio_proto::BindServer;
 use tokio_proto::pipeline::ServerProto;
-use tokio_service::Service;
+use tokio_service::{NewService, Service};
 use tokio_stdio::stdio::Stdio;
 use bytes::BytesMut;
 
 fn main() {
     dotenv().ok();
 
+    let server = CgiServer::new(CgiProto);
+
+    server.serve(move || Ok(CgiService));
+
+    //let mut core = Core::new().unwrap();
+    //let handle = core.handle();
+
+    //let stdio = Stdio::new(1, 1);
+    //let protocol = CgiProto;
+    //let service = CgiService;
+
+    //let server = future::lazy(move || -> FutureResult<(), io::Error> {
+    //    println!("serving...");
+    //    protocol.bind_server(&handle, stdio, service);
+    //    println!("served");
+    //    result::<(), io::Error>(Ok(()))
+    //});
+
+    //let status = match core.run(server) {
+    //    Ok(_) => 0,
+    //    Err(_) => 1,
+    //};
+    //::std::process::exit(status);
+    ::std::process::exit(0);
+}
+
+struct CgiServer<Kind, P> {
+    _kind: PhantomData<Kind>,
+    proto: Arc<P>,
+    threads: usize,
+}
+
+impl<Kind, P> CgiServer<Kind, P> where
+    P: BindServer<Kind, Stdio> + Send + Sync + 'static
+{
+    fn new(protocol: P) -> CgiServer<Kind, P> {
+        CgiServer {
+            _kind: PhantomData,
+            proto: Arc::new(protocol),
+            threads: 1,
+        }
+    }
+
+    fn threads(&mut self, threads: usize) {
+        assert!(threads > 0);
+        if cfg!(unix) {
+            self.threads = threads;
+        }
+    }
+
+    fn serve<S>(&self, new_service: S) where
+        S: NewService<Request = P::ServiceRequest,
+                      Response = P::ServiceResponse,
+                      Error = P::ServiceError> + Send + Sync + 'static,
+    {
+        let new_service = Arc::new(new_service);
+        self.with_handle(move |_| new_service.clone())
+    }
+
+    fn with_handle<F, S>(&self, new_service: F) where
+        F: Fn(&Handle) -> S + Send + Sync + 'static,
+        S: NewService<Request = P::ServiceRequest,
+                      Response = P::ServiceResponse,
+                      Error = P::ServiceError> + Send + Sync + 'static,
+    {
+        let proto = self.proto.clone();
+        let new_service = Arc::new(new_service);
+        let workers = self.threads;
+
+        let threads = (0..self.threads - 1).map(|i| {
+            let proto = proto.clone();
+            let new_service = new_service.clone();
+
+            thread::Builder::new().name(format!("worker{}", i)).spawn(move || {
+                serve(proto, &*new_service)
+            }).unwrap()
+        }).collect::<Vec<_>>();
+
+        serve(proto, &*new_service);
+
+        for thread in threads {
+            thread.join().unwrap();
+        }
+    }
+}
+
+fn serve<P, Kind, F, S>(binder: Arc<P>, new_service: &F)
+    -> Result<(), io::Error>
+    where P: BindServer<Kind, Stdio>,
+          F: Fn(&Handle) -> S,
+          S: NewService<Request = P::ServiceRequest,
+                        Response = P::ServiceResponse,
+                        Error = P::ServiceError> + 'static,
+{
     let mut core = Core::new().unwrap();
     let handle = core.handle();
+    let new_service = new_service(&handle);
 
     let stdio = Stdio::new(1, 1);
-    let protocol = CgiProto;
-    let service = CgiService;
 
     let server = future::lazy(move || -> FutureResult<(), io::Error> {
-        println!("serving...");
-        protocol.bind_server(&handle, stdio, service);
-        println!("served");
-        result::<(), io::Error>(Ok(()))
+        if let Ok(service) = new_service.new_service() {
+            println!("serving...");
+            binder.bind_server(&handle, stdio, service);
+            println!("served");
+            result::<(), io::Error>(Ok(()))
+        } else {
+            err::<(), io::Error>(io::Error::new(io::ErrorKind::Other, "Service failed"))
+        }
     });
 
-    let status = match core.run(server) {
-        Ok(_) => 0,
-        Err(_) => 1,
-    };
-    ::std::process::exit(status);
+    core.run(server)
 }
 
 #[derive(Deserialize, Debug)]
@@ -165,7 +257,7 @@ impl Codec for CgiCodec {
 
     // Produces a frame.
     fn encode(&mut self, msg: Self::Out, buf: &mut Vec<u8>) -> io::Result<()> {
-        println!("encode");
+        //println!("encode");
         match msg {
             CgiResponse::NotFound => {
                 buf.extend(b"HTTP/1.1 404 Not Found\r\n");
@@ -190,7 +282,7 @@ impl Decoder for CgiCodec {
     type Error = io::Error;
 
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        println!("decode");
+        //println!("decode");
         //let content_so_far = String::from_utf8_lossy(src.as_slice()).to_mut().clone();
 
         let mut url = None;
@@ -236,7 +328,7 @@ impl Encoder for CgiCodec {
     type Error = io::Error;
 
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        println!("encode");
+        //println!("encode");
         match item {
             CgiResponse::NotFound => {
                 dst.extend(b"HTTP/1.1 404 Not Found\r\n");
