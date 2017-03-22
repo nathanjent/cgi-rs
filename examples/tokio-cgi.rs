@@ -1,7 +1,6 @@
 extern crate dotenv;
 extern crate envy;
 extern crate futures;
-extern crate mio;
 extern crate tokio_core;
 extern crate tokio_io;
 extern crate tokio_proto;
@@ -62,8 +61,8 @@ struct CgiServer<Kind, P> {
     threads: usize,
 }
 
-impl<Kind, P> CgiServer<Kind, P> where
-    P: BindServer<Kind, Stdio> + Send + Sync + 'static
+impl<Kind, P> CgiServer<Kind, P>
+    where P: BindServer<Kind, Stdio> + Send + Sync + 'static
 {
     fn new(protocol: P) -> CgiServer<Kind, P> {
         CgiServer {
@@ -80,33 +79,36 @@ impl<Kind, P> CgiServer<Kind, P> where
         }
     }
 
-    fn serve<S>(&self, new_service: S) where
-        S: NewService<Request = P::ServiceRequest,
-                      Response = P::ServiceResponse,
-                      Error = P::ServiceError> + Send + Sync + 'static,
+    fn serve<S>(&self, new_service: S)
+        where S: NewService<Request = P::ServiceRequest,
+                            Response = P::ServiceResponse,
+                            Error = P::ServiceError> + Send + Sync + 'static
     {
         let new_service = Arc::new(new_service);
         self.with_handle(move |_| new_service.clone())
     }
 
-    fn with_handle<F, S>(&self, new_service: F) where
-        F: Fn(&Handle) -> S + Send + Sync + 'static,
-        S: NewService<Request = P::ServiceRequest,
-                      Response = P::ServiceResponse,
-                      Error = P::ServiceError> + Send + Sync + 'static,
+    fn with_handle<F, S>(&self, new_service: F)
+        where F: Fn(&Handle) -> S + Send + Sync + 'static,
+              S: NewService<Request = P::ServiceRequest,
+                            Response = P::ServiceResponse,
+                            Error = P::ServiceError> + Send + Sync + 'static
     {
         let proto = self.proto.clone();
         let new_service = Arc::new(new_service);
         let workers = self.threads;
 
-        let threads = (0..self.threads - 1).map(|i| {
-            let proto = proto.clone();
-            let new_service = new_service.clone();
+        let threads = (0..self.threads - 1)
+            .map(|i| {
+                let proto = proto.clone();
+                let new_service = new_service.clone();
 
-            thread::Builder::new().name(format!("worker{}", i)).spawn(move || {
-                serve(proto, &*new_service)
-            }).unwrap()
-        }).collect::<Vec<_>>();
+                thread::Builder::new()
+                    .name(format!("worker{}", i))
+                    .spawn(move || serve(proto, &*new_service))
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
 
         serve(proto, &*new_service);
 
@@ -116,13 +118,12 @@ impl<Kind, P> CgiServer<Kind, P> where
     }
 }
 
-fn serve<P, Kind, F, S>(binder: Arc<P>, new_service: &F)
-    -> Result<(), io::Error>
+fn serve<P, Kind, F, S>(binder: Arc<P>, new_service: &F) -> Result<(), io::Error>
     where P: BindServer<Kind, Stdio>,
           F: Fn(&Handle) -> S,
           S: NewService<Request = P::ServiceRequest,
                         Response = P::ServiceResponse,
-                        Error = P::ServiceError> + 'static,
+                        Error = P::ServiceError> + 'static
 {
     let mut core = Core::new().unwrap();
     let handle = core.handle();
