@@ -19,42 +19,69 @@ struct EnvRequest {
     request_method: String,
     #[serde(rename = "REQUEST_URI")]
     request_uri: String,
-    #[serde(default = "Vec::new")]
-    headers: Vec<(String, String)>,
-    #[serde(rename = "HTTP_UPGRADE_INSECURE_REQUESTS")]
-    https: u8,
-    server_protocol: String,
     #[serde(rename = "REMOTE_ADDR")]
     remote_addr: String,
     #[serde(rename = "REMOTE_PORT")]
-    remote_port: u8,
-    #[serde(rename = "CONTENT_LENGTH")]
-    content_length: usize,
+    remote_port: u64,
+    #[serde(rename = "CONTENT_LENGTH", default)]
+    content_length: u64,
+    #[serde(default = "http_headers")]
+    headers: Vec<(String, String)>,
+}
+
+fn http_headers() -> Vec<(String, String)> {
+    ::std::env::vars().filter_map(|(k, v)| {
+       match k.split("HTTP_").nth(1) {
+           Some(k) => Some((k.into(), v)),
+           None => None,
+       }
+    }).collect::<Vec<_>>()
 }
 
 fn main() {
     dotenv().ok();
     //println!("{:?}", ::std::env::vars().collect::<Vec<_>>());
 
-    let request = envy::from_env::<EnvRequest>().unwrap();
+    let status = match handle() {
+        Ok(_) => 0,
+        Err(e) => {
+            writeln!(io::stdout(), "Status: 500\r\n\r\n
+                     <h1>500 Internal Server Error</h1>
+                     <p>{}</p>", e)
+                .expect("Panic at write to STDOUT!");
+            1
+        }
+    };
+    ::std::process::exit(status);
+}
+
+fn handle() -> Result<(), Box<::std::error::Error>> {
+    // Deserialize request from environment variables
+    let request = envy::from_env::<EnvRequest>()?;
     //println!("{:?}", request);
 
-    let mut data = Vec::with_capacity(request.content_length);
-    let _length = io::stdin().read_exact(&mut data[..]);
+    // Read request body from stdin
+    let mut data = Vec::new();
+    io::stdin().take(request.content_length).read_to_end(&mut data)?;
 
+    // Generate a Rouille Request
     let request =
-        Request::fake_http_from(format!("{}:{}", request.remote_addr, request.remote_port)
-                                    .parse()
-                                    .unwrap(),
+        Request::fake_http_from(
+            format!("{}:{}", request.remote_addr, request.remote_port).parse()?,
                                 request.request_method,
                                 request.request_uri,
                                 request.headers,
                                 data);
 
+    // Route request 
     let _response = router!(request,
         // first route
         (GET) (/) => {
-            Response::text("Welcome")
+            let mut s = String::new();
+            for (k, v) in request.headers() {
+                s.push_str(&*format!("{}: {}\r\n", k, v));
+            }
+            Response::text(s)
         },
 
         // second route
@@ -70,11 +97,13 @@ fn main() {
         }
     );
 
-    //println!("{:?}", result);
-    send(&request, io::stdout(), || _response);
+    // Send resulting response after routing
+    send(&request, io::stdout(), || _response)?;
+    Ok(())
 }
 
 fn send<W, F>(rq: &Request, mut output: W, f: F)
+    -> Result<(), Box<::std::error::Error>>
     where W: Write,
           F: FnOnce() -> Response
 {
@@ -94,15 +123,16 @@ fn send<W, F>(rq: &Request, mut output: W, f: F)
     match response {
         Ok(response) => {
             for &(ref k, ref v) in response.headers.iter() {
-                let _ = writeln!(output, "{}: {}", k, v);
+                writeln!(output, "{}: {}", k, v)?;
             }
-            let _ = writeln!(output, "Status: {}", response.status_code);
+            //writeln!(output, "Status: {}", response.status_code)?;
             let (mut response_body, content_length) = response.data.into_reader_and_size();
             if let Some(content_length) = content_length {
-                let _ = writeln!(output, "Content-Length: {}",  content_length);
+                writeln!(output, "Content-Length: {}",  content_length)?;
             }
-            let _ = writeln!(output, "");
-            let _ = io::copy(&mut response_body, &mut output);
+            writeln!(output, "")?;
+            io::copy(&mut response_body, &mut output)?;
+            writeln!(output, "")?;
         }
         Err(payload) => {
             // There is probably no point in printing the payload, as this is done by the panic
@@ -111,6 +141,7 @@ fn send<W, F>(rq: &Request, mut output: W, f: F)
             panic::resume_unwind(payload);
         }
     }
+    Ok(())
 }
 
 fn format_time(duration: Duration) -> String {
