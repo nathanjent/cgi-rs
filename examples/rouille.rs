@@ -27,6 +27,8 @@ struct EnvRequest {
     content_length: u64,
     #[serde(default = "http_headers")]
     headers: Vec<(String, String)>,
+    #[serde(rename = "HTTP_UPGRADE_INSECURE_REQUESTS", default)]
+    https: u8,
 }
 
 fn http_headers() -> Vec<(String, String)> {
@@ -64,19 +66,28 @@ fn handle() -> Result<(), Box<::std::error::Error>> {
     let mut data = Vec::new();
     io::stdin().take(request.content_length).read_to_end(&mut data)?;
 
-    // Generate a Rouille Request
-    let request =
-        Request::fake_http_from(
+    // Generate a Rouille Request from the EnvRequest and body data from STDIN
+    // These fake_http methods are most-likely for testing but serve our purposes.
+    let request = match request.https {
+        1 => Request::fake_https_from(
             format!("{}:{}", request.remote_addr, request.remote_port).parse()?,
-                                request.request_method,
-                                request.request_uri,
-                                request.headers,
-                                data);
+            request.request_method,
+            request.request_uri,
+            request.headers,
+            data),
+        _ => Request::fake_http_from(
+            format!("{}:{}", request.remote_addr, request.remote_port).parse()?,
+            request.request_method,
+            request.request_uri,
+            request.headers,
+            data),
+    };
 
     // Route request 
     let _response = router!(request,
         // first route
         (GET) (/) => {
+            // print the http headers from the request for fun!
             let mut s = String::new();
             for (k, v) in request.headers() {
                 s.push_str(&*format!("{}: {}\r\n", k, v));
@@ -86,7 +97,7 @@ fn handle() -> Result<(), Box<::std::error::Error>> {
 
         // second route
         (GET) (/hello) => {
-            Response::text("Hello")
+            Response::html("<p>Hello world</p>")
         },
 
         // ... other routes here ...
@@ -102,6 +113,10 @@ fn handle() -> Result<(), Box<::std::error::Error>> {
     Ok(())
 }
 
+/// Sends a response to STDOUT.
+///
+/// The CGI server receives the response through the pipe and sends it along.
+/// TODO this is a modified version of the rouille log function, does it need to catch panics?
 fn send<W, F>(rq: &Request, mut output: W, f: F)
     -> Result<(), Box<::std::error::Error>>
     where W: Write,
@@ -144,6 +159,7 @@ fn send<W, F>(rq: &Request, mut output: W, f: F)
     Ok(())
 }
 
+// copied from the rouille log function
 fn format_time(duration: Duration) -> String {
     let secs_part = match duration.as_secs().checked_mul(1_000_000_000) {
         Some(v) => v,
